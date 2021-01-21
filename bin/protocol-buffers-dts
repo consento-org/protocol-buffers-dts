@@ -1,0 +1,133 @@
+#!/usr/bin/env node
+function argv (argv) {
+  const args = {}
+  const rest = []
+  const max = argv.length
+  const optionReg = /^--?/
+  const isOption = key => optionReg.test(key)
+  for (let i = 0; i < max; i++) {
+    let key = argv[i]
+    let val = true
+    const parts = key.split('=')
+    if (parts.length > 1) {
+      key = parts.shift()
+      val = parts.join('=')
+    } else if (i < max - 1) {
+      const next = argv[i + 1]
+      if (next === '=' && (i += 2) < max) {
+        val = argv[i]
+      } else if (isOption(key) && !isOption(next)) {
+        val = next
+        i += 1
+      }
+    }
+    if (!isOption(key)) {
+      rest.push(key)
+    } else {
+      args[key.replace(optionReg, '')] = val
+    }
+  }
+  let watch = args.w || args.watch || false
+  const file = rest[0] || null
+  let help = args.h || args.help || !file || false
+  let output = args.o || args.output || null
+  if (args.wo) {
+    output = args.wo
+    watch = true
+  }
+
+  if (typeof output !== 'string') {
+    // No output file defined
+    help = true
+  }
+  return { help, watch, output, file }
+}
+
+function rethrow (msg, e) {
+  e.message = `${msg}:\n\n${e.stack.split('\n').map(line => `    ${line}`).join('\n')}`
+  throw e
+}
+
+const controlZ = new Promise(resolve => {
+  process.once('SIGINT', () => resolve(true))
+})
+
+async function start ({ help, watch, output, file } = {}) {
+  if (help) {
+    console.log(`
+  Usage: protocol-buffers-dts [schema-file.proto] [options]
+  
+   --output, -o [output-file.d.ts]
+   --watch, -w  (recompile on schema change)
+  `)
+    return 1
+  }
+  const { parse } = require('protocol-buffers-schema')
+  const { fromSchema } = require('..')
+  const { readFile, writeFile } = require('fs').promises
+  let watcher
+  while (true) {
+    let rawSchema
+    try {
+      try {
+        rawSchema = await readFile(file, 'utf-8')
+      } catch (e) {
+        rethrow(`Error while reading ${file}`, e)
+      }
+      let schema
+      try {
+        schema = parse(rawSchema)
+      } catch (e) {
+        rethrow(`Error while parsing ${file}`, e)
+      }
+      let dts
+      try {
+        dts = fromSchema(schema)
+      } catch (e) {
+        rethrow(`Error while creating dts from ${file}`, e)
+      }
+      try {
+        await writeFile(output, dts)
+      } catch (e) {
+        rethrow(`Error while writing dts to ${output}`, e)
+      }
+      console.log(`Successfully wrote ${output}.`)
+    } catch (err) {
+      if (!watch) throw err
+      console.error(err)
+    }
+    if (!watch) {
+      break
+    }
+    if (!watcher) {
+      watcher = require('fs').watch(file, { interval: 100 })
+    }
+    console.log('Watching for changes.')
+    if (await Promise.race([
+      controlZ,
+      new Promise(resolve => watcher.once('change', () => resolve(false)))
+    ])) {
+      break
+    }
+  }
+  if (watcher) {
+    console.log('\nClosing watcher.')
+    watcher.close()
+  }
+  return 0
+}
+
+if (require.main === module) {
+  start(argv(process.argv.slice(2))).then(
+    code => process.exit(code),
+    e => {
+      console.error(e.stack)
+      process.exit(1)
+    }
+  )
+} else {
+  module.exports = {
+    argv,
+    start
+  }
+}
